@@ -1,7 +1,9 @@
 # claude-hook-notify: design
 
 Date: 2026-10-23
-Status: draft, awaiting approval
+Status: approved 2026-10-23 (user asked to start implementation). Spike
+results in section 12; they change the install story from a symlink to a
+shell wrapper.
 
 ## 1. Intent
 
@@ -64,7 +66,10 @@ alerts, sound), and cannot carry per-event context. This tool replaces it.
   works for a process whose executable lives inside an `.app` bundle with a
   `CFBundleIdentifier`. A bare binary raises an Objective-C exception
   ("bundleProxyForCurrentProcess is nil"). Therefore the CLI binary ships
-  inside a minimal bundle and is reached through a symlink on PATH.
+  inside a minimal bundle and is reached through a two-line shell wrapper on
+  PATH that `exec`s the binary by its bundle path. A plain symlink does not
+  work: `NSBundle.mainBundle` resolves the bundle from the path the process
+  was invoked by, not from the symlink target (spike result 1, section 12).
 - First use of a new bundle id triggers the system permission dialog. If the
   user never answers it, notifications fail silently at the OS level.
 - Posting is asynchronous. The process must wait for the completion handler
@@ -234,15 +239,18 @@ per wanted `notification_type`.
 1. Parse arguments. `--dry-run` builds the notification spec, prints it, exits.
 2. Confirm the process is inside a bundle: `NSBundle.mainBundle().bundleIdentifier`
    must be non-nil. If nil: stderr "claude-hook-notify must run from inside
-   ClaudeHookNotify.app; run `make install` and use the symlink", exit 1.
+   ClaudeHookNotify.app; run `make install` and call
+   ~/.local/bin/claude-hook-notify", exit 1.
    This check happens before any UserNotifications call, so the Objective-C
    exception is never reached.
 3. Get the `UNUserNotificationCenter` and read its settings
    (`getNotificationSettingsWithCompletionHandler`).
    - authorized or provisional: continue.
-   - not determined: call `requestAuthorizationWithOptions(alert | sound)` and
-     wait up to `--timeout` (120 s for `--request-permission`). If still not
-     authorized: stderr with the fix, exit 1.
+   - not determined: stderr "notification permission has not been requested
+     yet; run `~/.local/bin/claude-hook-notify --request-permission` once and
+     answer the dialog", exit 1. Only `--request-permission` calls
+     `requestAuthorizationWithOptions(alert | sound)` (120 s wait); a plain or
+     hook run never shows the dialog (see the section 12 addendum).
    - denied: stderr "notifications are disabled for Claude Hook Notify in
      System Settings > Notifications", exit 1.
 4. Build `UNMutableNotificationContent` (title, subtitle, body, sound,
@@ -292,11 +300,12 @@ A `Makefile` (thin wrapper around a shell script under `scripts/`) with:
   `target/bundle/`, `codesign --force --sign - ClaudeHookNotify.app`.
 - `make install`: copy the bundle to `~/Applications/ClaudeHookNotify.app`
   (replacing any previous copy), register it with LaunchServices
-  (`lsregister -f`), create the symlink
-  `~/.local/bin/claude-hook-notify -> ~/Applications/ClaudeHookNotify.app/Contents/MacOS/claude-hook-notify`,
-  then print: the absolute symlink path, the next step
+  (`lsregister -f`), write the wrapper script `~/.local/bin/claude-hook-notify`
+  (two lines: `#!/bin/sh` and
+  `exec "$HOME/Applications/ClaudeHookNotify.app/Contents/MacOS/claude-hook-notify" "$@"`,
+  mode 755), then print: the absolute wrapper path, the next step
   (`claude-hook-notify --request-permission`), and the hook JSON from 6.4.
-- `make uninstall`: remove symlink and bundle.
+- `make uninstall`: remove wrapper script and bundle.
 
 Rebuilding and reinstalling must not change the bundle id, so the
 notification permission granted once stays granted.
@@ -397,3 +406,46 @@ separates the pure part from the macOS part.
 - Empty default title in plain CLI mode.
 - Spike uses a throwaway bundle id and also checks that permission survives
   a rebuild.
+- After the spike: the PATH entry is a shell wrapper, not a symlink (section 12).
+- `snippet()` is applied to every body taken from the hook payload
+  (`last_assistant_message`, `message`), not only to the Stop body; it is a
+  normalisation, not a content change.
+- A `title` field in a `Notification` payload counts as present only when it
+  is non-empty after trimming; an empty title falls back to the type table.
+- "Humanized" for `hook_event_name` also splits CamelCase: `PreToolUse`
+  becomes `Pre tool use`. For `notification_type` only `_` is replaced.
+- `--sound ""` is treated as `default`.
+
+## 12. Spike results (2026-10-23)
+
+Throwaway bundle `ClaudeHookNotifySpike.app`, bundle id
+`com.isegodin.claude-hook-notify.spike`, ad-hoc signed, in `~/Applications`,
+built with objc2 0.6.5 / objc2-foundation 0.3.2 /
+objc2-user-notifications 0.3.2 / block2 0.6.2 on macOS 15.7.7.
+
+| # | Question | Result |
+|---|---|---|
+| 1 | Works through a symlink on PATH? | **No.** `NSBundle.mainBundle().bundlePath` was `~/.local/bin` and `bundleIdentifier` nil. The spec's fallback applies: a two-line `sh` wrapper that `exec`s the bundle path works (bundle found, 170 ms cold, 20 ms warm). |
+| 2 | Ad-hoc bundle gets the dialog and delivers? | **Yes.** `usernoted` presented the permission alert. The first answer came back `granted=false`, error "Notifications are not allowed for this application"; the user then enabled the app in System Settings > Notifications and `addNotificationRequest` completed with no error. |
+| 3 | Handlers fire without a run loop? | **Yes.** `getNotificationSettings` handler in 3-5 ms, `addNotificationRequest` handler in 3 ms, waiting on `std::sync::mpsc::recv_timeout` only. No `CFRunLoop`. |
+| 4 | Bare binary caught by the bundle check? | **Yes.** `bundleIdentifier` is `None` outside a bundle, exit 1, no Objective-C exception. |
+| 5 | Permission survives rebuild + re-sign + reinstall? | **Yes.** CDHash changed (`fd93a8ee…` to `d97a9809…`), status stayed `authorized`, delivery worked. macOS keys the grant on the bundle id and path. |
+
+Timing: a full post (bundle check, settings read, add request, wait) takes
+about 20 ms wall-clock through the wrapper.
+
+Consequence for the code: the `--request-permission` flow must treat
+`granted=false` with the "not allowed" error as "denied; enable the app in
+System Settings > Notifications", not as a transient failure.
+
+Addendum (real bundle, 2026-10-23 16:00): a permission dialog left unanswered
+until `--request-permission` gave up after 120 s was removed by macOS the
+moment the process exited, and the status changed from "not determined" to
+"denied". The only way back is System Settings > Notifications. The README
+tells the user to answer within two minutes.
+
+Consequence for the code (final review, 2026-10-23): plain and hook runs never
+request permission. A "not determined" status is an error naming
+`--request-permission` (section 6.5 step 3). Otherwise a hook firing before
+the first `--request-permission`, with the user looking elsewhere, would show
+the dialog for `--timeout` seconds and leave the tool permanently denied.
