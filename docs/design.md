@@ -1,9 +1,10 @@
 # claude-hook-notify: design
 
-Date: 2026-10-23
-Status: approved 2026-10-23 (user asked to start implementation). Spike
-results in section 12; they change the install story from a symlink to a
-shell wrapper.
+Last updated 2026-10-23. This document records what the tool must do, the
+constraints it rests on, the decisions taken, and the macOS behaviour verified
+on the development machine. How-to material lives in [setup](setup.md),
+[usage](usage.md), [troubleshooting](troubleshooting.md) and
+[development](development.md).
 
 ## 1. Intent
 
@@ -15,10 +16,11 @@ The reason it exists: the user wants to see a notification whenever Claude
 Code has finished its turn or is waiting for input, without having to watch
 the terminal. It must show regardless of which window is focused.
 
-The user already has a `Notification` hook in `~/.claude/settings.json` that
-runs `osascript -e 'display notification ...'`. That works but shows up as
+The previous setup was a `Notification` hook running
+`osascript -e 'display notification ...'`. That works but shows up as
 "Script Editor", cannot be given its own notification settings (persistent
-alerts, sound), and cannot carry per-event context. This tool replaces it.
+alerts, sound, Focus allow-list), and cannot carry per-event context. This
+tool replaced it.
 
 ## 2. Goals
 
@@ -27,20 +29,21 @@ alerts, sound), and cannot carry per-event context. This tool replaces it.
   hook's JSON from stdin and producing a sensible title, subtitle and body.
 - Appears in Notification Center under its own name and icon, with its own
   entry in System Settings > Notifications, so the user can choose Alerts
-  (persistent) vs Banners and pick a sound.
+  (persistent) vs Banners, pick a sound, and allow it through Focus modes.
 - Fast: returns in well under a second in the normal case; never hangs.
 - Honest: non-zero exit and a one-line stderr message whenever a
   notification was not delivered. Never a silent failure.
 - Safe for hooks: never produces an exit code that changes Claude's behaviour.
 
-## 3. Non-goals (version 1)
+## 3. Non-goals
 
 - Click actions (focus the terminal, open a URL, run a command). Clicking
   the notification just dismisses it.
 - Buttons, reply fields, images or attachments.
-- Breaking through Focus modes / Do Not Disturb. The user controls that in
-  System Settings. (Time-sensitive interruption level needs an entitlement and
-  is a possible later addition.)
+- Breaking through Focus modes. The user adds the app to a Focus's allow-list
+  in System Settings. The "time-sensitive" interruption level that bypasses
+  Focus needs an entitlement issued through Apple's provisioning, which an
+  ad-hoc signed app cannot carry; macOS downgrades the request silently.
 - Suppressing the notification when the terminal is frontmost. The user
   explicitly wants it shown in every case.
 - Linux or Windows support.
@@ -51,7 +54,7 @@ alerts, sound), and cannot carry per-event context. This tool replaces it.
 
 ## 4. Anti-goals (things that would make this a failure)
 
-- Exiting 0 when nothing was shown.
+- Exiting 0 when nothing was posted.
 - Exiting 2 from a hook. On a `Stop` hook exit 2 blocks Claude from stopping.
 - Blocking a hook for longer than a few seconds under any circumstance.
 - Depending on the deprecated `NSUserNotification` API or on bundle-id
@@ -62,6 +65,9 @@ alerts, sound), and cannot carry per-event context. This tool replaces it.
 
 ### 5.1 macOS
 
+Everything in this list was verified on the development machine; details and
+measurements are in section 10.
+
 - The modern `UserNotifications` framework (`UNUserNotificationCenter`) only
   works for a process whose executable lives inside an `.app` bundle with a
   `CFBundleIdentifier`. A bare binary raises an Objective-C exception
@@ -69,18 +75,33 @@ alerts, sound), and cannot carry per-event context. This tool replaces it.
   inside a minimal bundle and is reached through a two-line shell wrapper on
   PATH that `exec`s the binary by its bundle path. A plain symlink does not
   work: `NSBundle.mainBundle` resolves the bundle from the path the process
-  was invoked by, not from the symlink target (spike result 1, section 12).
-- First use of a new bundle id triggers the system permission dialog. If the
-  user never answers it, notifications fail silently at the OS level.
+  was invoked by, not from the symlink target.
+- An ad-hoc signed bundle in `~/Applications` gets the permission dialog and
+  delivers notifications. No Developer ID is needed.
+- The permission is keyed on the bundle id, so rebuilding, re-signing and
+  reinstalling keeps it.
+- First use of a new bundle id requires the system permission dialog. A
+  dialog that is still open when the requesting process exits is recorded as
+  declined; the only way back is System Settings > Notifications.
 - Posting is asynchronous. The process must wait for the completion handler
-  of `addNotificationRequest` before exiting.
+  of `addNotificationRequest` before exiting. Completion handlers fire on a
+  background queue without a run loop, so a channel wait with a timeout is
+  enough.
 - Notifications are system-level; the focus state of the terminal does not
-  matter. Focus modes can still hide them; that is user configuration.
+  matter. Focus modes (Do Not Disturb, Sleep, ...) still mute them: the
+  notification lands in Notification Center history without a banner or
+  sound. That is user configuration (Focus allow-list).
+- Notification Center shows the bundle's `CFBundleName` as the header and
+  the bundle's icon on the left of every banner. There is no public way to
+  change the icon per notification.
+- Launch Services caches icons and registers every copy of a bundle it
+  encounters. Two registered copies with the same bundle id (installed copy
+  and build copy) let the system resolve the id to the wrong path.
 - Development machine: macOS 15.7 (Sequoia), Apple Silicon, Xcode installed.
   On arm64 the Rust linker ad-hoc signs binaries automatically; the bundle is
-  re-signed ad-hoc after assembly.
+  re-signed ad-hoc after assembly. Minimum supported macOS is 13.
 
-### 5.2 Claude Code hooks (verified against docs for v2.1.292)
+### 5.2 Claude Code hooks (verified against the docs for v2.1.292)
 
 Hook commands run under non-interactive bash, inherit the user's PATH, run
 with cwd = project directory, and receive a JSON object on stdin. Default
@@ -114,14 +135,18 @@ Exit codes as seen by Claude Code: 0 = fine; 1 (or any non-zero other than 2)
 Notification hook matchers are exact-string matches on `notification_type`;
 an empty matcher matches all types.
 
+Claude Code snapshots the hook configuration when a session starts. Edits to
+`settings.json` reach a running session only after the user accepts them in
+`/hooks`, or in the next session.
+
 ## 6. The tool
 
 ### 6.1 Name and identity
 
 - Cargo package and binary: `claude-hook-notify`.
 - Bundle: `ClaudeHookNotify.app`, display name "Claude Hook Notify",
-  bundle id `com.isegodin.claude-hook-notify`. (My call; both are a one-line
-  change in `Info.plist` if the user prefers something else.)
+  bundle id `com.isegodin.claude-hook-notify`. Both are a one-line change in
+  the plist template.
 - The notification header shows the bundle display name automatically; the
   title line is therefore free to carry event information.
 
@@ -147,9 +172,9 @@ Options:
       --check             Print bundle id and authorization status to stdout.
                           Exit 0 if the tool can post, 1 otherwise.
       --request-permission
-                          Trigger the macOS permission dialog and wait for the
+                          Show the macOS permission dialog and wait for the
                           answer (up to 120 s). First-time setup.
-      --timeout <SECS>    Max wait for delivery confirmation. Default 5.
+      --timeout <SECS>    Max wait for each macOS reply, in seconds. Default 5.
   -v, --verbose           Diagnostics on stderr.
   -h, --help
   -V, --version
@@ -163,29 +188,30 @@ Design rules:
   notification and macOS relaunches the bundle): print usage to stderr,
   exit 1, no notification. `LSUIElement` in `Info.plist` keeps this invisible.
 - Usage errors exit 1, not 2. clap's default for usage errors is exit code 2,
-  which would be a blocking error if a hook was misconfigured; the builder
-  must remap it (for example via `Command::try_get_matches` or
-  `Error::exit` handling) and a test must cover it.
+  which would be a blocking error if a hook was misconfigured; it is remapped
+  and a test covers it. `--timeout 0` is a usage error.
 - In plain CLI mode the default title is empty: the notification header
   already shows the app name, so `claude-hook-notify "hello"` shows just
   the app name and the body.
 
 ### 6.3 Hook mode mapping (`--stdin-json`)
 
-Let `project` = last path component of `cwd` (omitted if `cwd` is missing).
-Let `snippet(s)` = `s` with all whitespace runs collapsed to one space,
-trimmed, cut to 200 characters with "…" appended if cut. (macOS truncates
-visually anyway; the limit just keeps the payload sane.)
+Let `project` = last path component of `cwd` (empty if `cwd` is missing or
+has no file name, such as `/`). Let `snippet(s)` = `s` with all whitespace
+runs collapsed to one space, trimmed, cut to 200 characters (characters, not
+bytes) with "…" appended if cut. macOS truncates visually anyway; the limit
+keeps the payload sane. `snippet` applies to every body taken from the
+payload.
 
 | hook_event_name | title | subtitle | body |
 |---|---|---|---|
 | `Stop` | `Finished` | `project` | `snippet(last_assistant_message)`, or `Done.` if empty |
-| `Notification` | payload `title` if present, else by type (below) | `project` | payload `message`, or empty |
+| `Notification` | payload `title` if non-empty after trimming, else by type (below) | `project` | `snippet(message)`, or empty |
 | `SubagentStop` | `Subagent finished` | `project` | `agent_type` if present, else empty |
 | anything else | humanized `hook_event_name` | `project` | empty |
-| not valid JSON / no `hook_event_name` | `Claude Code` | empty | the raw stdin, cut to 200 chars, or `(empty hook payload)` |
+| not valid JSON, not a JSON object, or no `hook_event_name` | `Claude Code` | empty | the raw stdin, cut to 200 chars, or `(empty hook payload)` |
 
-Title by `notification_type` when the payload has no `title`:
+Title by `notification_type` when the payload has no usable `title`:
 
 | notification_type | title |
 |---|---|
@@ -197,12 +223,17 @@ Title by `notification_type` when the payload has no `title`:
 | any other value | humanized type (`_` to space, first letter capitalized) |
 | missing | `Claude Code` |
 
+"Humanized" for `hook_event_name` also splits CamelCase: `PreToolUse`
+becomes `Pre tool use`. For `notification_type` only `_` is replaced.
+
 Additional behaviour in hook mode:
 - `threadIdentifier` of the notification is set to `session_id` so
   notifications from one session stack together in Notification Center.
 - `--title` / `--subtitle` on the command line override the derived values.
 - The tool never decides to stay silent for a recognised event. Choosing
   which events notify is done with hook matchers in `settings.json`.
+- A terminal on stdin counts as an empty payload (with a warning) rather
+  than waiting for input.
 - Exit code is 0 or 1 only. Never 2.
 
 ### 6.4 Recommended hook configuration
@@ -250,9 +281,11 @@ per wanted `notification_type`.
      yet; run `~/.local/bin/claude-hook-notify --request-permission` once and
      answer the dialog", exit 1. Only `--request-permission` calls
      `requestAuthorizationWithOptions(alert | sound)` (120 s wait); a plain or
-     hook run never shows the dialog (see the section 12 addendum).
-   - denied: stderr "notifications are disabled for Claude Hook Notify in
-     System Settings > Notifications", exit 1.
+     hook run never shows the dialog, because an unanswered dialog becomes a
+     permanent "denied" when the process exits, and a hook runs while the
+     user is looking elsewhere.
+   - denied (or any other status): stderr "notifications are disabled for
+     Claude Hook Notify in System Settings > Notifications", exit 1.
 4. Build `UNMutableNotificationContent` (title, subtitle, body, sound,
    threadIdentifier), wrap it in a `UNNotificationRequest` with a fresh UUID
    identifier and no trigger (deliver now).
@@ -262,15 +295,22 @@ per wanted `notification_type`.
    confirmation", exit 1.
 
 Completion handlers arrive on a background queue; a `std::sync::mpsc`
-channel with `recv_timeout` is expected to be enough, with no run loop
-required. This is one of the assumptions the spike verifies (see 8).
+channel with `recv_timeout` is enough, no run loop is required. Every wait
+is bounded by `--timeout`, so one run takes at most twice the timeout.
+
+`--request-permission` itself: bundle check, settings read; if already
+authorized say so and exit 0; if denied print the denied message and exit 1;
+otherwise request with a 120 s wait and report granted (exit 0) or not
+granted (exit 1, pointing at System Settings). A `granted=false` reply with
+the error "Notifications are not allowed for this application" means the
+user declined; it is reported as not granted, not as a transient failure.
 
 ### 6.6 Sound
 
 `--sound default` maps to `UNNotificationSound.defaultSound`. `--sound none`
 sets no sound. Any other value is passed to `UNNotificationSound soundNamed:`;
 macOS silently falls back to the default sound if the name does not exist,
-which is acceptable.
+which is acceptable. An empty `--sound ""` is treated as `default`.
 
 ## 7. Bundle, build and install
 
@@ -294,18 +334,23 @@ ClaudeHookNotify.app/
 
 ### 7.2 Build and install steps
 
-A `Makefile` (thin wrapper around a shell script under `scripts/`) with:
+A `Makefile` (thin wrapper around shell scripts under `scripts/`) with:
 
-- `make bundle`: `cargo build --release`, assemble the bundle under
-  `target/bundle/`, `codesign --force --sign - ClaudeHookNotify.app`.
+- `make icon`: render `bundle/icon.svg` into `target/icon/AppIcon.icns`
+  (see 7.3).
+- `make bundle`: `cargo build --release`, render the icon, assemble the bundle
+  under `target/bundle/`, `codesign --force --sign - ClaudeHookNotify.app`.
 - `make install`: copy the bundle to `~/Applications/ClaudeHookNotify.app`
-  (replacing any previous copy), register it with LaunchServices
-  (`lsregister -f`), write the wrapper script `~/.local/bin/claude-hook-notify`
+  (replacing any previous copy), register it with Launch Services
+  (`lsregister -f`), unregister the build copy under `target/bundle/`
+  (`lsregister -u`; it shares the bundle id and must not be the one the system
+  resolves), write the wrapper script `~/.local/bin/claude-hook-notify`
   (two lines: `#!/bin/sh` and
-  `exec "$HOME/Applications/ClaudeHookNotify.app/Contents/MacOS/claude-hook-notify" "$@"`,
+  `exec "<absolute bundle path>/Contents/MacOS/claude-hook-notify" "$@"`,
   mode 755), then print: the absolute wrapper path, the next step
   (`claude-hook-notify --request-permission`), and the hook JSON from 6.4.
-- `make uninstall`: remove wrapper script and bundle.
+- `make uninstall`: remove the wrapper script, unregister and remove the
+  bundle. Hook entries in `settings.json` are left to the user.
 
 Rebuilding and reinstalling must not change the bundle id, so the
 notification permission granted once stays granted.
@@ -313,15 +358,13 @@ notification permission granted once stays granted.
 ### 7.3 Icon
 
 The app icon is the only image macOS shows in the notification banner (left
-side) and next to the app in System Settings > Notifications. The modern
-UserNotifications framework has no public way to change it per notification.
+side) and next to the app in System Settings > Notifications.
 
 Source of truth: `bundle/icon.svg`, a 1024x1024 drawing clipped to the macOS
 rounded-square shape (824 px square at offset 100, corner radius 184): a
-hooded monk holding a candle on a parchment background, traced from
-`demoimage/monk_1.jpg` with vtracer (user decision 2026-10-23; it replaced
-the first bell-with-badge placeholder). The SVG is self-contained and does
-not reference the JPEG. Nothing rendered from it is versioned; rendered files
+hooded monk holding a candle on a parchment background, a vector trace of a
+raster illustration (the raster original is not kept in the repository). The
+SVG is self-contained. Nothing rendered from it is versioned; rendered files
 live under `target/`, which `.gitignore` already covers.
 
 `scripts/icon.sh [OUT_DIR]` (default `target/icon`) renders it with tools that
@@ -329,144 +372,95 @@ ship with macOS: `sips -s format png -z N N` for the ten iconset sizes
 (16, 32, 128, 256, 512 and their @2x doubles) into `AppIcon.iconset/`, then
 `iconutil -c icns` to `AppIcon.icns`. `sips` reads SVG through ImageIO on
 macOS 11 and later. `scripts/bundle.sh` runs it and copies the result to
-`Contents/Resources/AppIcon.icns` before signing; `make icon` runs it alone.
+`Contents/Resources/AppIcon.icns` before signing.
 
-Launch Services caches icons, so after the first install that carries an
-icon the banner may keep the generic one until `killall NotificationCenter`
-or a logout. The permission is unaffected (keyed on the bundle id).
+Launch Services caches icons, so after an install that changed the icon the
+banner may keep the old one until `killall NotificationCenter` or a logout.
+The permission is unaffected.
 
-## 8. Spike before planning the implementation
-
-A throwaway spike (minimal Rust binary in a hand-made bundle, no tests, not
-kept) must answer, in this order:
-
-1. Does `UNUserNotificationCenter` work when the binary is invoked through a
-   symlink on PATH, not via the bundle path?
-2. Does an ad-hoc signed bundle in `~/Applications` get the permission dialog
-   and then deliver notifications, with no Developer ID?
-3. Do the completion handlers fire without a running main run loop, so a
-   channel wait is sufficient?
-4. Does `--dry-run`-free invocation outside the bundle get caught by the
-   `bundleIdentifier` check before any exception?
-5. Does the granted permission survive a rebuild and reinstall? Each ad-hoc
-   signature is different, so this checks that macOS keys the permission on
-   the bundle id, not on the code signature.
-
-If 1 fails, fallback: the symlink becomes a tiny shell wrapper that `exec`s
-the binary by its bundle path. If 3 fails, run a `CFRunLoop` until the
-handler fires (with the same timeout). If 2 or 5 fails, stop and report to
-the user; either would change the install story.
-
-The spike uses a throwaway bundle id (for example
-`com.isegodin.claude-hook-notify.spike`) so the real bundle id stays in the
-"not determined" state for step 1 of the manual checklist in section 9.
-
-## 9. Testing
+## 8. Testing strategy
 
 Notification delivery cannot be asserted programmatically, so the design
 separates the pure part from the macOS part.
 
 - The mapping from (arguments, optional hook JSON) to a `NotificationSpec`
   struct {title, subtitle, body, sound, thread_id} is a pure function with
-  unit tests covering every row of the tables in 6.3, the snippet rules,
-  humanization, missing fields, invalid JSON and empty stdin.
-- `--dry-run` serialises that struct, so integration tests can run the real
-  binary with fixture payloads (copied from the Claude Code docs) and
-  compare stdout, without a bundle and without macOS calls.
-- Argument validation (mutual exclusion, missing message) is tested through
-  the binary's exit code and stderr.
-- Manual verification checklist, run before declaring done:
-  1. `make install`, then `claude-hook-notify --check` reports the bundle id
-     and "not determined".
-  2. `claude-hook-notify --request-permission` shows the dialog; after Allow,
-     `--check` exits 0.
-  3. `claude-hook-notify "hello"` with another app frontmost shows a banner
-     under "Claude Hook Notify" and exits 0 in under one second.
-  4. `echo '<Stop payload from docs>' | claude-hook-notify --stdin-json` shows
-     "Finished / <project> / <snippet>".
-  5. Same with a `permission_prompt` Notification payload shows
-     "Permission needed / <project> / <message>".
-  6. `--sound none` is silent; `--sound Glass` plays Glass.
-  7. Running the binary from `target/release/` directly fails with the
-     "must run from inside the bundle" message and exit 1.
-  8. With permission denied in System Settings, exit 1 and a clear message.
-  9. Wired into `~/.claude/settings.json`, a real Claude Code turn produces
-     the Stop notification, and a permission prompt produces the
-     Notification one.
+  unit tests covering every row of the tables in 6.3, the snippet rules
+  (including multibyte text), humanization, missing fields, invalid and
+  non-object JSON, and empty stdin.
+- `--dry-run` serialises that struct, so integration tests run the real
+  binary with fixture payloads and compare stdout, without a bundle and
+  without macOS calls.
+- Argument validation (mutual exclusion, missing message, `--timeout 0`) and
+  the bundle guard are tested through the binary's exit code and stderr.
+- The decision from an authorization status to "may post / not requested /
+  denied" is a pure function with unit tests. Only the Objective-C calls
+  themselves are untested by `cargo test`.
+- Real delivery is checked by the manual checklist in
+  [development.md](development.md).
 
-## 10. Implementation notes (left to the builder unless stated)
-
-- Crates: `clap` (derive) for arguments, `serde` + `serde_json` for hook
-  payloads and `--dry-run` output, `objc2`, `objc2-foundation`,
-  `objc2-user-notifications`, `block2` for the completion handlers.
-  Versions 0.3.x of the objc2 framework crates and 0.6.x of `block2` are
-  current on crates.io.
-- Rust edition and MSRV: builder's call; the machine has Rust 1.97.
-- Module split suggestion, not a requirement: `cli.rs` (clap types),
-  `spec.rs` (NotificationSpec + pure mapping), `hook.rs` (hook JSON types),
-  `macos.rs` (everything that touches Objective-C). Only `macos.rs` is
-  untestable.
-- Keep `main` thin: parse, build spec, dispatch.
-- Error messages name the fix, not just the failure.
-
-## 11. Decisions made by Claude in this design (user may override)
+## 9. Decisions
 
 - Bundle id `com.isegodin.claude-hook-notify`, display name "Claude Hook Notify".
 - Title/subtitle/body mapping in 6.3, including "Finished" as the Stop title
   and the project folder name as subtitle.
-- Default sound: the system default, not "Glass" as in the current osascript
+- Default sound: the system default, not "Glass" as in the old osascript
   hook. `--sound Glass` restores it.
-- Default delivery timeout 5 s; hook `timeout` 10 s in the recommended config.
-- Install location `~/Applications` and symlink in `~/.local/bin`.
+- Default timeout 5 s per macOS wait; hook `timeout` 10 s in the recommended
+  config.
+- Install location `~/Applications`; the PATH entry is a shell wrapper in
+  `~/.local/bin`, never a symlink.
 - Notifications grouped per session via `threadIdentifier`.
-- `SubagentStop` supported in the mapping but not wired in the recommended config.
-- Icon (user decision 2026-10-23, replaces "no icon for v1"): SVG source in
-  `bundle/icon.svg`, rendered at build time with `sips` + `iconutil`; the
-  rendered files are not versioned (section 7.3).
+- `SubagentStop` supported in the mapping but not wired in the recommended
+  config.
+- Only `--request-permission` shows the permission dialog; plain and hook
+  runs report "not requested" instead (6.5).
+- Icon: SVG source in `bundle/icon.svg`, rendered at build time with `sips` +
+  `iconutil`; rendered files are not versioned (7.3).
 - Usage errors exit 1 (clap's default of 2 is remapped).
 - Empty default title in plain CLI mode.
-- Spike uses a throwaway bundle id and also checks that permission survives
-  a rebuild.
-- After the spike: the PATH entry is a shell wrapper, not a symlink (section 12).
 - `snippet()` is applied to every body taken from the hook payload
-  (`last_assistant_message`, `message`), not only to the Stop body; it is a
-  normalisation, not a content change.
+  (`last_assistant_message`, `message`); it is a normalisation, not a content
+  change.
 - A `title` field in a `Notification` payload counts as present only when it
   is non-empty after trimming; an empty title falls back to the type table.
-- "Humanized" for `hook_event_name` also splits CamelCase: `PreToolUse`
-  becomes `Pre tool use`. For `notification_type` only `_` is replaced.
 - `--sound ""` is treated as `default`.
+- The installer unregisters the build copy from Launch Services so only the
+  installed bundle is known to the system.
 
-## 12. Spike results (2026-10-23)
+## 10. Verified macOS behaviour (2026-10-23)
 
-Throwaway bundle `ClaudeHookNotifySpike.app`, bundle id
-`com.isegodin.claude-hook-notify.spike`, ad-hoc signed, in `~/Applications`,
-built with objc2 0.6.5 / objc2-foundation 0.3.2 /
-objc2-user-notifications 0.3.2 / block2 0.6.2 on macOS 15.7.7.
+Verified on macOS 15.7.7 with objc2 0.6.5, objc2-foundation 0.3.2,
+objc2-user-notifications 0.3.2 and block2 0.6.2, first with a throwaway
+bundle id and then with the real one.
 
 | # | Question | Result |
 |---|---|---|
-| 1 | Works through a symlink on PATH? | **No.** `NSBundle.mainBundle().bundlePath` was `~/.local/bin` and `bundleIdentifier` nil. The spec's fallback applies: a two-line `sh` wrapper that `exec`s the bundle path works (bundle found, 170 ms cold, 20 ms warm). |
-| 2 | Ad-hoc bundle gets the dialog and delivers? | **Yes.** `usernoted` presented the permission alert. The first answer came back `granted=false`, error "Notifications are not allowed for this application"; the user then enabled the app in System Settings > Notifications and `addNotificationRequest` completed with no error. |
+| 1 | Works through a symlink on PATH? | **No.** `NSBundle.mainBundle().bundlePath` was `~/.local/bin` and `bundleIdentifier` nil. A two-line `sh` wrapper that `exec`s the bundle path works (bundle found, 170 ms cold, 20 ms warm). |
+| 2 | Ad-hoc bundle gets the dialog and delivers? | **Yes.** `usernoted` presented the permission alert and `addNotificationRequest` completed with no error. |
 | 3 | Handlers fire without a run loop? | **Yes.** `getNotificationSettings` handler in 3-5 ms, `addNotificationRequest` handler in 3 ms, waiting on `std::sync::mpsc::recv_timeout` only. No `CFRunLoop`. |
 | 4 | Bare binary caught by the bundle check? | **Yes.** `bundleIdentifier` is `None` outside a bundle, exit 1, no Objective-C exception. |
-| 5 | Permission survives rebuild + re-sign + reinstall? | **Yes.** CDHash changed (`fd93a8ee…` to `d97a9809…`), status stayed `authorized`, delivery worked. macOS keys the grant on the bundle id and path. |
+| 5 | Permission survives rebuild + re-sign + reinstall? | **Yes.** The code hash changed, status stayed `authorized`, delivery worked. macOS keys the grant on the bundle id. |
 
-Timing: a full post (bundle check, settings read, add request, wait) takes
-about 20 ms wall-clock through the wrapper.
+Further observations on the real bundle:
 
-Consequence for the code: the `--request-permission` flow must treat
-`granted=false` with the "not allowed" error as "denied; enable the app in
-System Settings > Notifications", not as a transient failure.
-
-Addendum (real bundle, 2026-10-23 16:00): a permission dialog left unanswered
-until `--request-permission` gave up after 120 s was removed by macOS the
-moment the process exited, and the status changed from "not determined" to
-"denied". The only way back is System Settings > Notifications. The README
-tells the user to answer within two minutes.
-
-Consequence for the code (final review, 2026-10-23): plain and hook runs never
-request permission. A "not determined" status is an error naming
-`--request-permission` (section 6.5 step 3). Otherwise a hook firing before
-the first `--request-permission`, with the user looking elsewhere, would show
-the dialog for `--timeout` seconds and leave the tool permanently denied.
+- A full post (bundle check, settings read, add request, wait) takes about
+  20-25 ms wall-clock through the wrapper.
+- A `requestAuthorization` reply of `granted=false` with the error
+  "Notifications are not allowed for this application" is what a declined
+  dialog looks like.
+- A permission dialog left unanswered until `--request-permission` gave up
+  after 120 s was removed by macOS the moment the process exited, and the
+  status changed from "not determined" to "denied". The only way back is
+  System Settings > Notifications. This is why plain and hook runs never
+  request permission themselves.
+- With a Focus mode active, the daemon logs "Delivering" and "Presenting"
+  and the tool gets a successful completion, but Notification Center logs
+  `muted by DND suppression` and shows no banner. The notification is in
+  Notification Center history. Adding the app to the Focus allow-list fixes
+  it.
+- Launch Services had registered both `~/Applications/ClaudeHookNotify.app`
+  and the build copy under `target/bundle/` under the same bundle id; the
+  installer now unregisters the build copy.
+- `sips` on macOS 15 renders SVG (including gradients and clip paths) at the
+  requested pixel size, and `iconutil` accepts the resulting iconset.

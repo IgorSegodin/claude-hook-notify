@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the release binary, assemble ClaudeHookNotify.app under target/bundle/
 # and ad-hoc sign it. The bundle id never changes between builds, so a granted
-# notification permission survives a rebuild (spec section 12).
+# notification permission survives a rebuild (docs/design.md section 10).
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

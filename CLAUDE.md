@@ -7,33 +7,40 @@ turn or is waiting for input, regardless of which window is focused.
 
 ## Where things are
 
-- Design spec (source of truth for scope and decisions):
-  `docs/superpowers/specs/2026-10-23-claude-hook-notify-design.md`
-- Implementation plan: `docs/superpowers/plans/2026-10-23-claude-hook-notify.md`
-- Spike results: spec section 12.
+- `README.md`: high-level only. Details live in `docs/`:
+  - `docs/design.md`: source of truth for scope, decisions and verified macOS
+    behaviour (section 10).
+  - `docs/setup.md`, `docs/usage.md`, `docs/troubleshooting.md`: user guides.
+  - `docs/development.md`: build, layout, icon pipeline, manual checklist.
 - App icon source: `bundle/icon.svg`; `scripts/icon.sh` renders it at build time
-  into `target/icon/` (not versioned), spec section 7.3.
+  into `target/icon/` (not versioned), design section 7.3.
+- Keep this split: new how-to or troubleshooting text goes into the matching
+  `docs/` file, not into the README.
 
 ## Status
 
 - 2026-10-23: brainstormed, spec written, builder check passed with no open questions.
 - 2026-10-23: spec approved (user asked to start implementation). Spike run,
-  all five assumptions answered (spec section 12). Plan written.
+  all five assumptions answered (now docs/design.md section 10). Plan written.
 - 2026-10-23: plan executed inline (all 7 tasks, TDD). `cargo test` passes
   (45 unit + 16 integration), `cargo clippy --all-targets -- -D warnings` is
-  clean. Manual checklist passed (spec section 9, items 1 to 9): permission
+  clean. Manual checklist passed (now in docs/development.md): permission
   granted, real notifications delivered in about 25 ms, permission survives
   `make install`, hooks wired into `~/.claude/settings.json`.
-- 2026-10-23: app icon added (Task 8): SVG source, rendered during `make bundle`.
-- Nothing is committed yet (user directive: do not commit).
+- 2026-10-23: app icon added: SVG source, rendered during `make bundle`.
+  Installer unregisters the build copy from Launch Services.
+- 2026-10-23: docs normalized: README reduced to an overview; guides under
+  `docs/`; the implementation plan and the dated spec were removed (the spec
+  became `docs/design.md`).
+- The user makes the commits. Claude does not commit.
 
 ## Environment facts (verified 2026-10-23)
 
 - macOS 15.7.7 (Sequoia), Apple Silicon (arm64), Xcode installed at /Applications/Xcode.app.
 - Rust 1.97.1 via rustup (Homebrew). `cargo` and `rustc` on PATH.
 - Claude Code 2.1.292.
-- The user already has a `Notification` hook in `~/.claude/settings.json` that
-  runs `osascript -e 'display notification ...'`. This tool replaces it.
+- `~/.claude/settings.json` has the `Stop` and `Notification` hooks from
+  `make install` (they replaced the old osascript hook on 2026-10-23).
 - Crates confirmed on crates.io: `objc2-user-notifications` 0.3.x,
   `objc2-foundation` 0.3.x, `block2` 0.6.x, `clap` 4.x.
 
@@ -51,7 +58,7 @@ turn or is waiting for input, regardless of which window is focused.
   Exit 2 on a `Stop` hook blocks Claude from stopping. Only 0 or 1.
 - The tool must exit quickly (well under the hook timeout) and must never hang.
 
-## Spike results (verified 2026-10-23, details in spec section 12)
+## Spike results (verified 2026-10-23, details in docs/design.md section 10)
 
 1. Symlink on PATH: FAILS (bundle id nil). Shell wrapper that execs the
    bundle path: works.
@@ -73,11 +80,12 @@ turn or is waiting for input, regardless of which window is focused.
   Keep the JSON-to-notification mapping and argument handling as pure
   functions with unit tests, and use `--dry-run` for end-to-end checks that
   do not touch macOS APIs.
-- Manual verification: the spec has a checklist. Run it before claiming done.
+- Manual verification: `docs/development.md` has the checklist. Run it before
+  claiming done.
 
 ## Working style
 
 - Follow the superpowers skills (brainstorming -> writing-plans -> TDD ->
   verification-before-completion). Spec first, plan second, code third.
-- Keep the CLI surface exactly as the spec says; propose changes in chat
-  rather than silently widening scope.
+- Keep the CLI surface exactly as `docs/design.md` says; propose changes in
+  chat rather than silently widening scope.
