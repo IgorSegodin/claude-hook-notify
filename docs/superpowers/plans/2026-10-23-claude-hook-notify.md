@@ -626,3 +626,50 @@ Update the `Status` section of `CLAUDE.md` with the date and "manual checklist p
 git add CLAUDE.md
 git commit -m "docs: record completed manual verification"
 ```
+
+### Task 8: App icon from an SVG source (added 2026-10-23, spec 7.3)
+
+**Files:**
+- Create: `bundle/icon.svg`, `scripts/icon.sh`
+- Modify: `scripts/bundle.sh`, `bundle/Info.plist.template`, `Makefile`, `README.md`, `CLAUDE.md`
+- Test: none in `cargo test` (build scripts, as in Task 6); verified by the steps below.
+
+**Interfaces:**
+- Consumes: `scripts/bundle.sh` from Task 6 (`$ROOT`, `$APP`, copy-then-sign order).
+- Produces: `scripts/icon.sh [OUT_DIR]` writes `OUT_DIR/AppIcon.icns` (default `target/icon`), exit 1 with a message when the SVG is missing or a render fails; the bundle gains `Contents/Resources/AppIcon.icns`; the plist gains `CFBundleIconFile` = `AppIcon`; `make icon` target.
+
+- [ ] **Step 1: Verify the gap**
+
+Run: `test -s target/bundle/ClaudeHookNotify.app/Contents/Resources/AppIcon.icns; echo "exit=$?"`
+Expected: `exit=1` (no Resources directory yet).
+
+- [ ] **Step 2: Add `bundle/icon.svg`**
+
+1024x1024 viewBox, rounded square 824 px at offset 100 with corner radius 184, blue gradient, white bell (knob, dome, flared skirt, clapper), red badge with white ring top-right (spec 7.3).
+
+- [ ] **Step 3: Write `scripts/icon.sh`**
+
+POSIX `sh`, `set -eu`. Renders the SVG with `sips -s format png -z N N` for N in 16, 32, 128, 256, 512 as `icon_{N}x{N}.png` and 2N as `icon_{N}x{N}@2x.png` into a fresh `AppIcon.iconset`, checks each output is non-empty, then `iconutil -c icns` to `AppIcon.icns`. Prints `icon ready: <path>`.
+
+- [ ] **Step 4: Run the icon script**
+
+Run: `sh scripts/icon.sh && file target/icon/AppIcon.icns && ls target/icon/AppIcon.iconset | wc -l`
+Expected: `Mac OS X icon`, 10 files.
+
+- [ ] **Step 5: Wire it into the bundle**
+
+`scripts/bundle.sh` runs `sh "$ROOT/scripts/icon.sh"` after `cargo build` and copies `target/icon/AppIcon.icns` to `$APP/Contents/Resources/AppIcon.icns` before `codesign`. `bundle/Info.plist.template` gains `CFBundleIconFile` = `AppIcon`. `Makefile` gains an `icon` target (`sh scripts/icon.sh`).
+
+- [ ] **Step 6: Verify the bundle**
+
+Run: `make bundle && plutil -extract CFBundleIconFile raw target/bundle/ClaudeHookNotify.app/Contents/Info.plist && test -s target/bundle/ClaudeHookNotify.app/Contents/Resources/AppIcon.icns && echo icon-present`
+Expected: `AppIcon`, `icon-present`, codesign `valid on disk`.
+
+- [ ] **Step 7: Install and look**
+
+Run: `make install && claude-hook-notify --check && claude-hook-notify "icon check"`
+Expected: `authorized`, both exit 0, the banner shows the bell icon (user confirms). If the generic icon persists: `killall NotificationCenter`, post again.
+
+- [ ] **Step 8: Docs**
+
+README: icon paragraph under Development (source, `make icon`, cache note). CLAUDE.md: icon source under "Where things are", Status line. No commit (user directive).

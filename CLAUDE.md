@@ -11,6 +11,8 @@ turn or is waiting for input, regardless of which window is focused.
   `docs/superpowers/specs/2026-10-23-claude-hook-notify-design.md`
 - Implementation plan: `docs/superpowers/plans/2026-10-23-claude-hook-notify.md`
 - Spike results: spec section 12.
+- App icon source: `bundle/icon.svg`; `scripts/icon.sh` renders it at build time
+  into `target/icon/` (not versioned), spec section 7.3.
 
 ## Status
 
@@ -22,6 +24,7 @@ turn or is waiting for input, regardless of which window is focused.
   clean. Manual checklist passed (spec section 9, items 1 to 9): permission
   granted, real notifications delivered in about 25 ms, permission survives
   `make install`, hooks wired into `~/.claude/settings.json`.
+- 2026-10-23: app icon added (Task 8): SVG source, rendered during `make bundle`.
 - Nothing is committed yet (user directive: do not commit).
 
 ## Environment facts (verified 2026-10-23)

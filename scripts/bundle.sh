@@ -10,10 +10,12 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 [ -n "$VERSION" ] || { echo "bundle.sh: could not read version from Cargo.toml" >&2; exit 1; }
 
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
+sh "$ROOT/scripts/icon.sh" "$ROOT/target/icon"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/target/release/claude-hook-notify" "$APP/Contents/MacOS/claude-hook-notify"
+cp "$ROOT/target/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/bundle/Info.plist.template" > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"
 codesign --force --sign - "$APP"

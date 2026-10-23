@@ -2,3 +2,5 @@
 *.iml
 .superpowers/
 target/
+
+.DS_Store

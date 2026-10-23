@@ -1,10 +1,13 @@
-.PHONY: build test bundle install uninstall
+.PHONY: build test icon bundle install uninstall
 
 build:
 	cargo build
 
 test:
 	cargo test
+
+icon:
+	sh scripts/icon.sh
 
 bundle:
 	sh scripts/bundle.sh

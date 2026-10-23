@@ -283,14 +283,14 @@ ClaudeHookNotify.app/
     MacOS/
       claude-hook-notify        # the Rust release binary
     Resources/
-      AppIcon.icns              # optional in v1, see below
+      AppIcon.icns              # rendered from bundle/icon.svg, see 7.3
 ```
 
 `Info.plist` keys: `CFBundleIdentifier`, `CFBundleName`, `CFBundleDisplayName`,
 `CFBundleExecutable`, `CFBundlePackageType` = `APPL`, `CFBundleVersion`,
 `CFBundleShortVersionString` (from `Cargo.toml` version), `LSUIElement` = true
 (no Dock icon, no menu bar), `LSMinimumSystemVersion` = `13.0`,
-`CFBundleIconFile` when an icon is present.
+`CFBundleIconFile` = `AppIcon`.
 
 ### 7.2 Build and install steps
 
@@ -312,9 +312,28 @@ notification permission granted once stays granted.
 
 ### 7.3 Icon
 
-A custom icon is a stretch goal, not a requirement for v1. If it is cheap
-(a flat PNG converted with `sips` + `iconutil` during `make bundle`), include
-it; otherwise macOS shows a generic app icon and that is fine. Builder's call.
+The app icon is the only image macOS shows in the notification banner (left
+side) and next to the app in System Settings > Notifications. The modern
+UserNotifications framework has no public way to change it per notification.
+
+Source of truth: `bundle/icon.svg`, a 1024x1024 drawing clipped to the macOS
+rounded-square shape (824 px square at offset 100, corner radius 184): a
+hooded monk holding a candle on a parchment background, traced from
+`demoimage/monk_1.jpg` with vtracer (user decision 2026-10-23; it replaced
+the first bell-with-badge placeholder). The SVG is self-contained and does
+not reference the JPEG. Nothing rendered from it is versioned; rendered files
+live under `target/`, which `.gitignore` already covers.
+
+`scripts/icon.sh [OUT_DIR]` (default `target/icon`) renders it with tools that
+ship with macOS: `sips -s format png -z N N` for the ten iconset sizes
+(16, 32, 128, 256, 512 and their @2x doubles) into `AppIcon.iconset/`, then
+`iconutil -c icns` to `AppIcon.icns`. `sips` reads SVG through ImageIO on
+macOS 11 and later. `scripts/bundle.sh` runs it and copies the result to
+`Contents/Resources/AppIcon.icns` before signing; `make icon` runs it alone.
+
+Launch Services caches icons, so after the first install that carries an
+icon the banner may keep the generic one until `killall NotificationCenter`
+or a logout. The permission is unaffected (keyed on the bundle id).
 
 ## 8. Spike before planning the implementation
 
@@ -401,7 +420,9 @@ separates the pure part from the macOS part.
 - Install location `~/Applications` and symlink in `~/.local/bin`.
 - Notifications grouped per session via `threadIdentifier`.
 - `SubagentStop` supported in the mapping but not wired in the recommended config.
-- No icon required for v1.
+- Icon (user decision 2026-10-23, replaces "no icon for v1"): SVG source in
+  `bundle/icon.svg`, rendered at build time with `sips` + `iconutil`; the
+  rendered files are not versioned (section 7.3).
 - Usage errors exit 1 (clap's default of 2 is remapped).
 - Empty default title in plain CLI mode.
 - Spike uses a throwaway bundle id and also checks that permission survives

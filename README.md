@@ -105,7 +105,15 @@ Then remove the hook entries from `~/.claude/settings.json`.
 ```sh
 cargo test        # unit tests plus --dry-run integration tests; no bundle needed
 make bundle       # builds target/bundle/ClaudeHookNotify.app without installing
+make icon         # renders only the icon into target/icon/
 ```
+
+The app icon, shown on the left of every banner, is `bundle/icon.svg`. `make
+bundle` renders it with `sips` and `iconutil` (both ship with macOS) into
+`target/icon/AppIcon.icns`, which is not versioned, and copies it into the
+bundle. After changing the SVG run `make install`; if the banner still shows
+the old icon, run `killall NotificationCenter` or log out and in. The
+notification permission is not affected.
 
 Design notes and the manual verification checklist live in
 `docs/superpowers/specs/2026-10-23-claude-hook-notify-design.md`.
